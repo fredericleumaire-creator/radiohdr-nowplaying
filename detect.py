@@ -11,7 +11,7 @@ from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
-INTERVAL_SECS = 60
+INTERVAL_SECS = 30
 
 def main():
     print('🎵 HDR Now Playing Worker démarré')
