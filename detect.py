@@ -12,7 +12,8 @@ from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
-INTERVAL_SECS = 30
+INTERVAL_SECS  = 30
+ICECAST_URL    = 'http://stream.principeactif.net/status-json.xsl'
 RETRY_SECS    = 15
 
 def main():
@@ -61,8 +62,9 @@ async def run_detection():
         if album:
             break
 
-    print(f'🎵 {artist} — {title}' + (f' ({album})' if album else ''))
-    save_to_firestore({'title': title, 'artist': artist, 'album': album, 'cover': cover})
+    listeners = fetch_listeners()
+    print(f'🎵 {artist} — {title}' + (f' ({album})' if album else '') + f' | 👥 {listeners} auditeurs')
+    save_to_firestore({'title': title, 'artist': artist, 'album': album, 'cover': cover, 'listeners': listeners})
     return True
 
 def capture_stream():
@@ -80,12 +82,23 @@ def capture_stream():
         print(f'[capture] {e}')
         return None
 
+def fetch_listeners():
+    try:
+        req = urllib.request.Request(ICECAST_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            return data.get('icestats', {}).get('source', {}).get('listeners', 0)
+    except Exception as e:
+        print(f'[icecast] {e}')
+        return 0
+
 def save_to_firestore(data):
     body = json.dumps({'fields': {
         'title':      {'stringValue':  data.get('title')  or ''},
         'artist':     {'stringValue':  data.get('artist') or ''},
         'album':      {'stringValue':  data.get('album')  or ''},
         'cover':      {'stringValue':  data.get('cover')  or ''},
+        'listeners':  {'integerValue': str(data.get('listeners') or 0)},
         'updated_at': {'integerValue': str(int(time.time()))},
     }}).encode()
     req = urllib.request.Request(FIRESTORE_URL, data=body, method='PATCH',
