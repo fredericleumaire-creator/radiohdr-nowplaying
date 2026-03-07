@@ -1,6 +1,7 @@
 """
 HDR Now Playing — Railway Background Worker
 Utilise ShazamIO pour la reconnaissance musicale
+Retry rapide (15s) si non reconnu, sinon pause 30s
 """
 
 import asyncio
@@ -11,7 +12,8 @@ from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
-INTERVAL_SECS = 30
+INTERVAL_SECS = 30   # pause si reconnu
+RETRY_SECS    = 15   # retry rapide si non reconnu
 
 def main():
     print('🎵 HDR Now Playing Worker démarré')
@@ -20,11 +22,13 @@ def main():
 async def loop():
     while True:
         try:
-            await run_detection()
+            recognized = await run_detection()
+            wait = INTERVAL_SECS if recognized else RETRY_SECS
         except Exception as e:
             print(f'[erreur] {e}')
-        print(f'⏳ Pause {INTERVAL_SECS}s...')
-        await asyncio.sleep(INTERVAL_SECS)
+            wait = RETRY_SECS
+        print(f'⏳ Pause {wait}s...')
+        await asyncio.sleep(wait)
 
 async def run_detection():
     print(f'\n[{time.strftime("%H:%M:%S")}] Détection...')
@@ -32,7 +36,7 @@ async def run_detection():
     mp3_data = capture_stream()
     if not mp3_data:
         print('❌ Stream inaccessible')
-        return
+        return False
     print(f'✅ {len(mp3_data)} bytes')
 
     shazam = Shazam()
@@ -41,11 +45,11 @@ async def run_detection():
     track = result.get('track')
     if not track:
         print('❌ Non reconnu')
-        return
+        return False
 
-    title  = track.get('title')
-    artist = track.get('subtitle')
-    cover  = track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart')
+    title   = track.get('title')
+    artist  = track.get('subtitle')
+    cover   = track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart')
     spotify = None
     for p in track.get('hub', {}).get('providers', []):
         if p.get('type') == 'SPOTIFY':
@@ -54,9 +58,10 @@ async def run_detection():
 
     print(f'🎵 {artist} — {title}')
     save_to_firestore({'title': title, 'artist': artist, 'cover': cover, 'spotify': spotify})
+    return True
 
 def capture_stream():
-    bytes_needed = 80_000
+    bytes_needed = 150_000  # ~10 sec à 128kbps
     req = urllib.request.Request(STREAM_URL, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Range': f'bytes=0-{bytes_needed}',
