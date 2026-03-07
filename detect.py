@@ -12,8 +12,8 @@ from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
-INTERVAL_SECS = 30   # pause si reconnu
-RETRY_SECS    = 15   # retry rapide si non reconnu
+INTERVAL_SECS = 30
+RETRY_SECS    = 15
 
 def main():
     print('🎵 HDR Now Playing Worker démarré')
@@ -47,21 +47,26 @@ async def run_detection():
         print('❌ Non reconnu')
         return False
 
-    title   = track.get('title')
-    artist  = track.get('subtitle')
-    cover   = track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart')
-    spotify = None
-    for p in track.get('hub', {}).get('providers', []):
-        if p.get('type') == 'SPOTIFY':
-            spotify = p.get('actions', [{}])[0].get('uri')
+    title  = track.get('title')
+    artist = track.get('subtitle')
+    cover  = track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart')
+
+    # Extraire l'album depuis les sections
+    album = None
+    for section in track.get('sections', []):
+        for meta in section.get('metadata', []):
+            if meta.get('title', '').lower() == 'album':
+                album = meta.get('text')
+                break
+        if album:
             break
 
-    print(f'🎵 {artist} — {title}')
-    save_to_firestore({'title': title, 'artist': artist, 'cover': cover, 'spotify': spotify})
+    print(f'🎵 {artist} — {title}' + (f' ({album})' if album else ''))
+    save_to_firestore({'title': title, 'artist': artist, 'album': album, 'cover': cover})
     return True
 
 def capture_stream():
-    bytes_needed = 150_000  # ~10 sec à 128kbps
+    bytes_needed = 150_000
     req = urllib.request.Request(STREAM_URL, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Range': f'bytes=0-{bytes_needed}',
@@ -77,10 +82,10 @@ def capture_stream():
 
 def save_to_firestore(data):
     body = json.dumps({'fields': {
-        'title':      {'stringValue':  data.get('title')   or ''},
-        'artist':     {'stringValue':  data.get('artist')  or ''},
-        'cover':      {'stringValue':  data.get('cover')   or ''},
-        'spotify':    {'stringValue':  data.get('spotify') or ''},
+        'title':      {'stringValue':  data.get('title')  or ''},
+        'artist':     {'stringValue':  data.get('artist') or ''},
+        'album':      {'stringValue':  data.get('album')  or ''},
+        'cover':      {'stringValue':  data.get('cover')  or ''},
         'updated_at': {'integerValue': str(int(time.time()))},
     }}).encode()
     req = urllib.request.Request(FIRESTORE_URL, data=body, method='PATCH',
