@@ -11,7 +11,7 @@ import json
 import urllib.request
 import numpy as np
 import io
-from pydub import AudioSegment
+import miniaudio
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
@@ -59,11 +59,9 @@ def capture_stream():
         return None
 
 def mp3_to_pcm(mp3_data):
-    # Décoder le MP3 correctement avec pydub/ffmpeg
-    audio = AudioSegment.from_mp3(io.BytesIO(mp3_data))
-    # Convertir en mono 16kHz
-    audio = audio.set_channels(1).set_frame_rate(SAMPLE_RATE).set_sample_width(2)
-    samples = np.frombuffer(audio.raw_data, dtype=np.int16)
+    # Décoder le MP3 correctement avec miniaudio
+    decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=SAMPLE_RATE, output_format=miniaudio.SampleFormat.SIGNED16)
+    samples = np.frombuffer(decoded.samples, dtype=np.int16)
     return samples.astype(np.float32) / 32768.0
 
 def find_peaks(pcm):
