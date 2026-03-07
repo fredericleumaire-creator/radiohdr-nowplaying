@@ -44,7 +44,7 @@ def run_detection():
     save_to_firestore(result)
 
 def capture_stream():
-    bytes_needed = 500_000  # ~5 sec à 128kbps
+    bytes_needed = 80_000  # ~5 sec à 128kbps
     req = urllib.request.Request(STREAM_URL, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Range': f'bytes=0-{bytes_needed}',
@@ -71,7 +71,13 @@ def find_peaks(pcm):
     peaks    = []
 
     if len(pcm) < fft_size:
-        return peaks
+        # Garder uniquement les 100 pics les plus forts par bande
+    filtered = []
+    for band in range(4):
+        band_peaks = [p for p in peaks if p['band'] == band]
+        band_peaks.sort(key=lambda p: p.get('mag', 0), reverse=True)
+        filtered.extend(band_peaks[:25])  # max 25 pics par bande
+    return filtered
 
     window   = np.hanning(fft_size)
     n_frames = (len(pcm) - fft_size) // hop_size
@@ -96,6 +102,7 @@ def find_peaks(pcm):
                     'freq': int((lo_b + best_idx) * SAMPLE_RATE / fft_size),
                     'time': frame,
                     'band': bi,
+                    'mag':  best_mag,
                 })
 
     return peaks
