@@ -1,0 +1,2 @@
+# Aucune dépendance externe — tout est en stdlib Python
+# urllib, json, struct, math, base64, uuid sont inclus dans Python
