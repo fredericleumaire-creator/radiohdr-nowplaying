@@ -1,16 +1,15 @@
 """
-HDR Now Playing — Render/Railway Background Worker
-Tourne en boucle infinie, détecte le morceau toutes les 60 secondes
-et écrit directement dans Firestore
+HDR Now Playing — Railway Background Worker
+Utilise numpy pour une FFT précise compatible Shazam
 """
 
 import struct
-import math
 import time
 import uuid
 import base64
 import json
 import urllib.request
+import numpy as np
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
@@ -71,7 +70,7 @@ def mp3_to_pcm(mp3_data):
     target     = SAMPLE_RATE * CAPTURE_SECS
 
     while pos + frame_size < len(mp3_data) and len(pcm) < target:
-        pos += 4  # skip header
+        pos += 4
         payload = min(frame_size - 4, len(mp3_data) - pos)
         if payload < 2:
             break
@@ -84,19 +83,7 @@ def mp3_to_pcm(mp3_data):
             pcm.append(s / 32768.0)
         pos += frame_size
 
-    return pcm
-
-def dft(samples):
-    n  = min(len(samples), 512)
-    s  = samples[:n]
-    re = [0.0] * n
-    im = [0.0] * n
-    for k in range(n):
-        for j in range(n):
-            a = -2.0 * math.pi * k * j / n
-            re[k] += s[j] * math.cos(a)
-            im[k] += s[j] * math.sin(a)
-    return re, im
+    return np.array(pcm, dtype=np.float32)
 
 def find_peaks(pcm):
     fft_size = 2048
@@ -105,37 +92,32 @@ def find_peaks(pcm):
     peaks    = []
 
     if len(pcm) < fft_size:
-        print(f'[peaks] PCM trop court: {len(pcm)} samples')
         return peaks
 
+    # Fenêtre de Hann
+    window   = np.hanning(fft_size)
     n_frames = (len(pcm) - fft_size) // hop_size
 
     for frame in range(n_frames):
-        start = frame * hop_size
-        chunk = pcm[start: start + fft_size]
+        chunk = pcm[frame * hop_size: frame * hop_size + fft_size]
         if len(chunk) < fft_size:
             break
 
-        # Fenêtre de Hann
-        chunk = [s * 0.5 * (1.0 - math.cos(2.0 * math.pi * i / (fft_size - 1)))
-                 for i, s in enumerate(chunk)]
-
-        re, im = dft(chunk)
-        half   = fft_size // 2
-        mags   = [math.sqrt(re[i] ** 2 + im[i] ** 2) for i in range(min(len(re), half))]
+        # FFT avec numpy — précise et rapide
+        spectrum = np.fft.rfft(chunk * window)
+        mags     = np.abs(spectrum)
 
         for bi, (lo_hz, hi_hz) in enumerate(bands):
             lo_b = max(0, int(lo_hz * fft_size / SAMPLE_RATE))
             hi_b = min(int(hi_hz * fft_size / SAMPLE_RATE), len(mags) - 1)
             if lo_b >= hi_b:
                 continue
-            best_mag, best_bin = 0.0, lo_b
-            for b in range(lo_b, hi_b + 1):
-                if mags[b] > best_mag:
-                    best_mag, best_bin = mags[b], b
+            band_mags = mags[lo_b:hi_b + 1]
+            best_idx  = np.argmax(band_mags)
+            best_mag  = band_mags[best_idx]
             if best_mag > 0.01:
                 peaks.append({
-                    'freq': int(best_bin * SAMPLE_RATE / fft_size),
+                    'freq': int((lo_b + best_idx) * SAMPLE_RATE / fft_size),
                     'time': frame,
                     'band': bi,
                 })
@@ -163,7 +145,6 @@ def recognize(mp3_data):
     pcm = mp3_to_pcm(mp3_data)
     print(f'[pcm] {len(pcm)} samples')
     if len(pcm) < 1000:
-        print('[pcm] trop court')
         return None
 
     peaks = find_peaks(pcm)
@@ -171,8 +152,8 @@ def recognize(mp3_data):
     if not peaks:
         return None
 
-    sig = encode_signature(peaks, len(pcm))
-    url = f'https://amp.shazam.com/discovery/v5/fr/FR/android/-/tag/{uuid.uuid4()}/{uuid.uuid4()}'
+    sig  = encode_signature(peaks, len(pcm))
+    url  = f'https://amp.shazam.com/discovery/v5/fr/FR/android/-/tag/{uuid.uuid4()}/{uuid.uuid4()}'
     body = json.dumps({
         'timezone':    'Europe/Paris',
         'signature':   {'uri': sig, 'samplems': CAPTURE_SECS * 1000},
