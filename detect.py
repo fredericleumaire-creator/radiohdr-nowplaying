@@ -1,6 +1,5 @@
 """
 HDR Now Playing — Railway Background Worker
-Utilise pydub + ffmpeg pour décoder le MP3 correctement
 """
 
 import struct
@@ -10,7 +9,6 @@ import base64
 import json
 import urllib.request
 import numpy as np
-import io
 import miniaudio
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
@@ -59,7 +57,6 @@ def capture_stream():
         return None
 
 def mp3_to_pcm(mp3_data):
-    # Décoder le MP3 correctement avec miniaudio
     decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=SAMPLE_RATE, output_format=miniaudio.SampleFormat.SIGNED16)
     samples = np.frombuffer(decoded.samples, dtype=np.int16)
     return samples.astype(np.float32) / 32768.0
@@ -71,13 +68,7 @@ def find_peaks(pcm):
     peaks    = []
 
     if len(pcm) < fft_size:
-        # Garder uniquement les 100 pics les plus forts par bande
-    filtered = []
-    for band in range(4):
-        band_peaks = [p for p in peaks if p['band'] == band]
-        band_peaks.sort(key=lambda p: p.get('mag', 0), reverse=True)
-        filtered.extend(band_peaks[:25])  # max 25 pics par bande
-    return filtered
+        return peaks
 
     window   = np.hanning(fft_size)
     n_frames = (len(pcm) - fft_size) // hop_size
@@ -105,7 +96,13 @@ def find_peaks(pcm):
                     'mag':  best_mag,
                 })
 
-    return peaks
+    # Garder les 25 pics les plus forts par bande (max 100 au total)
+    filtered = []
+    for band in range(4):
+        band_peaks = [p for p in peaks if p['band'] == band]
+        band_peaks.sort(key=lambda p: p['mag'], reverse=True)
+        filtered.extend(band_peaks[:25])
+    return filtered
 
 def encode_signature(peaks, n_samples):
     h  = struct.pack('<IIII', 0xcafe2580, 0, 0x0001520, 0)
