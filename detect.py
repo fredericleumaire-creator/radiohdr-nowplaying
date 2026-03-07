@@ -1,6 +1,6 @@
 """
 HDR Now Playing — Railway Background Worker
-Utilise numpy pour une FFT précise compatible Shazam
+Utilise pydub + ffmpeg pour décoder le MP3 correctement
 """
 
 import struct
@@ -10,6 +10,8 @@ import base64
 import json
 import urllib.request
 import numpy as np
+import io
+from pydub import AudioSegment
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
@@ -42,7 +44,7 @@ def run_detection():
     save_to_firestore(result)
 
 def capture_stream():
-    bytes_needed = SAMPLE_RATE * 2 * CAPTURE_SECS * 8
+    bytes_needed = 500_000  # ~5 sec à 128kbps
     req = urllib.request.Request(STREAM_URL, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Range': f'bytes=0-{bytes_needed}',
@@ -57,33 +59,12 @@ def capture_stream():
         return None
 
 def mp3_to_pcm(mp3_data):
-    # Chercher le sync word MP3
-    offset = 0
-    for i in range(min(len(mp3_data) - 4, 2048)):
-        if mp3_data[i] == 0xFF and (mp3_data[i+1] & 0xE0) == 0xE0:
-            offset = i
-            break
-
-    pcm        = []
-    frame_size = 417
-    pos        = offset
-    target     = SAMPLE_RATE * CAPTURE_SECS
-
-    while pos + frame_size < len(mp3_data) and len(pcm) < target:
-        pos += 4
-        payload = min(frame_size - 4, len(mp3_data) - pos)
-        if payload < 2:
-            break
-        for j in range(0, payload - 1, 2):
-            if pos + j + 1 >= len(mp3_data):
-                break
-            s = (mp3_data[pos + j] << 8) | mp3_data[pos + j + 1]
-            if s > 32767:
-                s -= 65536
-            pcm.append(s / 32768.0)
-        pos += frame_size
-
-    return np.array(pcm, dtype=np.float32)
+    # Décoder le MP3 correctement avec pydub/ffmpeg
+    audio = AudioSegment.from_mp3(io.BytesIO(mp3_data))
+    # Convertir en mono 16kHz
+    audio = audio.set_channels(1).set_frame_rate(SAMPLE_RATE).set_sample_width(2)
+    samples = np.frombuffer(audio.raw_data, dtype=np.int16)
+    return samples.astype(np.float32) / 32768.0
 
 def find_peaks(pcm):
     fft_size = 2048
@@ -94,7 +75,6 @@ def find_peaks(pcm):
     if len(pcm) < fft_size:
         return peaks
 
-    # Fenêtre de Hann
     window   = np.hanning(fft_size)
     n_frames = (len(pcm) - fft_size) // hop_size
 
@@ -102,8 +82,6 @@ def find_peaks(pcm):
         chunk = pcm[frame * hop_size: frame * hop_size + fft_size]
         if len(chunk) < fft_size:
             break
-
-        # FFT avec numpy — précise et rapide
         spectrum = np.fft.rfft(chunk * window)
         mags     = np.abs(spectrum)
 
@@ -113,8 +91,8 @@ def find_peaks(pcm):
             if lo_b >= hi_b:
                 continue
             band_mags = mags[lo_b:hi_b + 1]
-            best_idx  = np.argmax(band_mags)
-            best_mag  = band_mags[best_idx]
+            best_idx  = int(np.argmax(band_mags))
+            best_mag  = float(band_mags[best_idx])
             if best_mag > 0.01:
                 peaks.append({
                     'freq': int((lo_b + best_idx) * SAMPLE_RATE / fft_size),
@@ -142,7 +120,12 @@ def encode_signature(peaks, n_samples):
     return 'data:audio/vnd.shazam.sig;base64,' + base64.b64encode(h + body).decode()
 
 def recognize(mp3_data):
-    pcm = mp3_to_pcm(mp3_data)
+    try:
+        pcm = mp3_to_pcm(mp3_data)
+    except Exception as e:
+        print(f'[pcm] erreur décodage: {e}')
+        return None
+
     print(f'[pcm] {len(pcm)} samples')
     if len(pcm) < 1000:
         return None
