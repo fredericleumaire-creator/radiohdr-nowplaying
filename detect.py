@@ -1,48 +1,62 @@
 """
 HDR Now Playing — Railway Background Worker
+Utilise ShazamIO pour la reconnaissance musicale
 """
 
-import struct
+import asyncio
 import time
-import uuid
-import base64
 import json
 import urllib.request
-import numpy as np
-import miniaudio
+from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
 INTERVAL_SECS = 60
-SAMPLE_RATE   = 16000
-CAPTURE_SECS  = 5
 
 def main():
     print('🎵 HDR Now Playing Worker démarré')
+    asyncio.run(loop())
+
+async def loop():
     while True:
         try:
-            run_detection()
+            await run_detection()
         except Exception as e:
             print(f'[erreur] {e}')
         print(f'⏳ Pause {INTERVAL_SECS}s...')
-        time.sleep(INTERVAL_SECS)
+        await asyncio.sleep(INTERVAL_SECS)
 
-def run_detection():
+async def run_detection():
     print(f'\n[{time.strftime("%H:%M:%S")}] Détection...')
+
     mp3_data = capture_stream()
     if not mp3_data:
         print('❌ Stream inaccessible')
         return
     print(f'✅ {len(mp3_data)} bytes')
-    result = recognize(mp3_data)
-    if not result:
+
+    shazam = Shazam()
+    result = await shazam.recognize(mp3_data)
+
+    track = result.get('track')
+    if not track:
         print('❌ Non reconnu')
         return
-    print(f'🎵 {result["artist"]} — {result["title"]}')
-    save_to_firestore(result)
+
+    title  = track.get('title')
+    artist = track.get('subtitle')
+    cover  = track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart')
+    spotify = None
+    for p in track.get('hub', {}).get('providers', []):
+        if p.get('type') == 'SPOTIFY':
+            spotify = p.get('actions', [{}])[0].get('uri')
+            break
+
+    print(f'🎵 {artist} — {title}')
+    save_to_firestore({'title': title, 'artist': artist, 'cover': cover, 'spotify': spotify})
 
 def capture_stream():
-    bytes_needed = 80_000  # ~5 sec à 128kbps
+    bytes_needed = 80_000
     req = urllib.request.Request(STREAM_URL, headers={
         'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Range': f'bytes=0-{bytes_needed}',
@@ -54,122 +68,6 @@ def capture_stream():
             return data if len(data) > 1000 else None
     except Exception as e:
         print(f'[capture] {e}')
-        return None
-
-def mp3_to_pcm(mp3_data):
-    decoded = miniaudio.decode(mp3_data, nchannels=1, sample_rate=SAMPLE_RATE, output_format=miniaudio.SampleFormat.SIGNED16)
-    samples = np.frombuffer(decoded.samples, dtype=np.int16)
-    return samples.astype(np.float32) / 32768.0
-
-def find_peaks(pcm):
-    fft_size = 2048
-    hop_size = 64
-    bands    = [(250, 520), (520, 1450), (1450, 3500), (3500, 5500)]
-    peaks    = []
-
-    if len(pcm) < fft_size:
-        return peaks
-
-    window   = np.hanning(fft_size)
-    n_frames = (len(pcm) - fft_size) // hop_size
-
-    for frame in range(n_frames):
-        chunk = pcm[frame * hop_size: frame * hop_size + fft_size]
-        if len(chunk) < fft_size:
-            break
-        spectrum = np.fft.rfft(chunk * window)
-        mags     = np.abs(spectrum)
-
-        for bi, (lo_hz, hi_hz) in enumerate(bands):
-            lo_b = max(0, int(lo_hz * fft_size / SAMPLE_RATE))
-            hi_b = min(int(hi_hz * fft_size / SAMPLE_RATE), len(mags) - 1)
-            if lo_b >= hi_b:
-                continue
-            band_mags = mags[lo_b:hi_b + 1]
-            best_idx  = int(np.argmax(band_mags))
-            best_mag  = float(band_mags[best_idx])
-            if best_mag > 0.01:
-                peaks.append({
-                    'freq': int((lo_b + best_idx) * SAMPLE_RATE / fft_size),
-                    'time': frame,
-                    'band': bi,
-                    'mag':  best_mag,
-                })
-
-    # Garder les 25 pics les plus forts par bande (max 100 au total)
-    filtered = []
-    for band in range(4):
-        band_peaks = [p for p in peaks if p['band'] == band]
-        band_peaks.sort(key=lambda p: p['mag'], reverse=True)
-        filtered.extend(band_peaks[:25])
-    return filtered
-
-def encode_signature(peaks, n_samples):
-    h  = struct.pack('<IIII', 0xcafe2580, 0, 0x0001520, 0)
-    h += struct.pack('<IIII', n_samples, 0, 0, 0)
-    body = b''
-    for band in range(4):
-        bp = [p for p in peaks if p['band'] == band]
-        if not bp:
-            continue
-        enc = b''
-        for p in bp:
-            freq_mhz = int(p['freq'] * 1_000_000 / SAMPLE_RATE)
-            enc += struct.pack('<I', (p['time'] << 16) | (freq_mhz & 0xFFFF))
-        sz  = len(enc)
-        pad = (4 - sz % 4) % 4
-        body += struct.pack('<II', 0x60030040 + band, sz) + enc + b'\x00' * pad
-    return 'data:audio/vnd.shazam.sig;base64,' + base64.b64encode(h + body).decode()
-
-def recognize(mp3_data):
-    try:
-        pcm = mp3_to_pcm(mp3_data)
-    except Exception as e:
-        print(f'[pcm] erreur décodage: {e}')
-        return None
-
-    print(f'[pcm] {len(pcm)} samples')
-    if len(pcm) < 1000:
-        return None
-
-    peaks = find_peaks(pcm)
-    print(f'[peaks] {len(peaks)} pics trouvés')
-    if not peaks:
-        return None
-
-    sig  = encode_signature(peaks, len(pcm))
-    url  = f'https://amp.shazam.com/discovery/v5/fr/FR/android/-/tag/{uuid.uuid4()}/{uuid.uuid4()}'
-    body = json.dumps({
-        'timezone':    'Europe/Paris',
-        'signature':   {'uri': sig, 'samplems': CAPTURE_SECS * 1000},
-        'timestamp':   int(time.time() * 1000),
-        'context':     {},
-        'geolocation': {},
-    }).encode()
-
-    req = urllib.request.Request(url, data=body, headers={
-        'Content-Type': 'application/json',
-        'User-Agent':   'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data  = json.loads(resp.read())
-            track = data.get('track')
-            if not track:
-                return None
-            result = {
-                'title':   track.get('title'),
-                'artist':  track.get('subtitle'),
-                'cover':   track.get('images', {}).get('coverarthq') or track.get('images', {}).get('coverart'),
-                'spotify': None,
-            }
-            for p in track.get('hub', {}).get('providers', []):
-                if p.get('type') == 'SPOTIFY':
-                    result['spotify'] = p.get('actions', [{}])[0].get('uri')
-                    break
-            return result if result['title'] and result['artist'] else None
-    except Exception as e:
-        print(f'[shazam] {e}')
         return None
 
 def save_to_firestore(data):
