@@ -87,7 +87,15 @@ def fetch_listeners():
         req = urllib.request.Request(ICECAST_URL, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
-            return data.get('icestats', {}).get('source', {}).get('listeners', 0)
+            sources = data.get('icestats', {}).get('source', [])
+            # source est un tableau — on cherche le flux hdr.mp3
+            if isinstance(sources, list):
+                for s in sources:
+                    if 'hdr.mp3' in s.get('listenurl', ''):
+                        return s.get('listeners', 0)
+            elif isinstance(sources, dict):
+                return sources.get('listeners', 0)
+            return 0
     except Exception as e:
         print(f'[icecast] {e}')
         return 0
