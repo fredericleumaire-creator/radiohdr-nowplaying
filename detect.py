@@ -1,4 +1,4 @@
-import asyncio, time, json, urllib.request, subprocess, tempfile, os
+import asyncio, time, json, urllib.request
 from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
@@ -26,19 +26,15 @@ async def run_detection():
         save_to_firestore({})
         return False
 
-    # Décoder MP3 → WAV PCM pour meilleure reconnaissance
-    audio_data = decode_to_wav(mp3_data) or mp3_data
-
     shazam = Shazam()
-    result = await shazam.recognize(audio_data)
+    result = await shazam.recognize(mp3_data)
     track  = result.get('track')
 
     if not track:
         print('[shazam] 1er essai échoué, retry...')
         mp3_data2  = capture_stream()
         if mp3_data2:
-            audio_data2 = decode_to_wav(mp3_data2) or mp3_data2
-            result2 = await shazam.recognize(audio_data2)
+            result2 = await shazam.recognize(mp3_data2)
             track   = result2.get('track')
 
     if not track:
@@ -67,40 +63,6 @@ async def run_detection():
     })
     print(f'[shazam] ✅ {title} — {artist}')
     return True
-
-def decode_to_wav(mp3_data: bytes) -> bytes | None:
-    """Décode le MP3 en WAV PCM 16bit 44100Hz via ffmpeg."""
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_in:
-            tmp_in.write(mp3_data)
-            tmp_in_path = tmp_in.name
-
-        tmp_out_path = tmp_in_path.replace('.mp3', '.wav')
-
-        result = subprocess.run([
-            'ffmpeg', '-y',
-            '-i', tmp_in_path,
-            '-ar', '44100',   # sample rate standard Shazam
-            '-ac', '1',       # mono
-            '-sample_fmt', 's16',
-            tmp_out_path
-        ], capture_output=True, timeout=15)
-
-        if result.returncode != 0:
-            return None
-
-        with open(tmp_out_path, 'rb') as f:
-            wav_data = f.read()
-
-        return wav_data if len(wav_data) > 1000 else None
-
-    except Exception as e:
-        print(f'[ffmpeg] erreur: {e}')
-        return None
-    finally:
-        for p in [tmp_in_path, tmp_out_path]:
-            try: os.unlink(p)
-            except: pass
 
 def capture_stream():
     """Lit le stream en continu pendant ~8 secondes."""
