@@ -31,7 +31,15 @@ async def run_detection():
     track  = result.get('track')
 
     if not track:
-        save_to_firestore({})  # échec reconnaissance → vider
+        # Retry une fois avant de déclarer échec
+        print('[shazam] 1er essai échoué, retry...')
+        mp3_data2 = capture_stream()
+        if mp3_data2:
+            result2 = await shazam.recognize(mp3_data2)
+            track   = result2.get('track')
+
+    if not track:
+        save_to_firestore({})  # échec définitif → vider
         print('[shazam] Titre non reconnu — Firestore vidé')
         return False
 
@@ -74,16 +82,27 @@ def fetch_listeners():
         return 0
 
 def capture_stream():
-    bytes_needed = 150_000
+    """Ouvre le stream et lit pendant ~8 secondes pour avoir un extrait propre."""
     req = urllib.request.Request(STREAM_URL, headers={
-        'User-Agent': 'Mozilla/5.0 (compatible; RadioHDR/1.0)',
-        'Range':      f'bytes=0-{bytes_needed}',
+        'User-Agent':   'Mozilla/5.0 (compatible; RadioHDR/1.0)',
         'Icy-MetaData': '0',
     })
     try:
+        chunks = []
+        total  = 0
+        target = 320_000  # ~8s à 320kbps
+        deadline = time.time() + 10  # max 10s
+
         with urllib.request.urlopen(req, timeout=15) as resp:
-            data = resp.read(bytes_needed)
-            return data if len(data) > 1000 else None
+            while total < target and time.time() < deadline:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+
+        data = b''.join(chunks)
+        return data if len(data) > 10_000 else None
     except:
         return None
 
