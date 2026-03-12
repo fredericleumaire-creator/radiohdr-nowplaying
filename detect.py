@@ -2,10 +2,15 @@ import asyncio, time, json, urllib.request
 from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
-FIRESTORE_URL = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying/current'
+FIRESTORE_BASE = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying'
+FIRESTORE_CURRENT = f'{FIRESTORE_BASE}/current'
+FIRESTORE_BEFORE  = f'{FIRESTORE_BASE}/before'
 ICECAST_URL   = 'http://stream.principeactif.net/status-json.xsl'
 INTERVAL_SECS = 30
 RETRY_SECS    = 15
+
+# ─── État en mémoire du dernier current connu ────────────────────────────────
+last_current: dict | None = None
 
 def main():
     asyncio.run(loop())
@@ -21,9 +26,11 @@ async def loop():
         await asyncio.sleep(wait)
 
 async def run_detection():
+    global last_current
+
     mp3_data = capture_stream()
     if not mp3_data:
-        save_to_firestore({})
+        _handle_transition(None)
         return False
 
     shazam = Shazam()
@@ -32,13 +39,13 @@ async def run_detection():
 
     if not track:
         print('[shazam] 1er essai échoué, retry...')
-        mp3_data2  = capture_stream()
+        mp3_data2 = capture_stream()
         if mp3_data2:
             result2 = await shazam.recognize(mp3_data2)
             track   = result2.get('track')
 
     if not track:
-        save_to_firestore({})
+        _handle_transition(None)
         print('[shazam] Titre non reconnu — Firestore vidé')
         return False
 
@@ -54,15 +61,43 @@ async def run_detection():
         if album: break
 
     listeners = fetch_listeners()
-    save_to_firestore({
+    new_current = {
         'title':     title,
         'artist':    artist,
         'album':     album,
         'cover':     cover,
         'listeners': listeners,
-    })
+    }
+
+    _handle_transition(new_current)
     print(f'[shazam] ✅ {title} — {artist}')
     return True
+
+
+def _handle_transition(new_data: dict | None):
+    """
+    Gère la transition current → before selon l'algo :
+    - Si last_current est non null ET différent du nouveau → copier dans before
+    - Écrire new_data dans current (null ou nouveau morceau)
+    """
+    global last_current
+
+    new_is_different = (
+        last_current is not None and
+        new_data != last_current and
+        # Comparer sur title+artist pour éviter faux positifs sur listeners
+        (new_data is None or
+         new_data.get('title') != last_current.get('title') or
+         new_data.get('artist') != last_current.get('artist'))
+    )
+
+    if new_is_different:
+        save_to_firestore(last_current, FIRESTORE_BEFORE)
+        print(f'[before] ← {last_current.get("title")} — {last_current.get("artist")}')
+
+    save_to_firestore(new_data or {}, FIRESTORE_CURRENT)
+    last_current = new_data  # None ou le nouveau morceau
+
 
 def capture_stream():
     """Lit le stream en continu pendant ~8 secondes."""
@@ -105,7 +140,7 @@ def fetch_listeners():
     except:
         return 0
 
-def save_to_firestore(data):
+def save_to_firestore(data: dict, url: str):
     body = json.dumps({'fields': {
         'title':      {'stringValue':  data.get('title')    or ''},
         'artist':     {'stringValue':  data.get('artist')   or ''},
@@ -115,7 +150,7 @@ def save_to_firestore(data):
         'updated_at': {'integerValue': str(int(time.time()))},
     }}).encode()
     req = urllib.request.Request(
-        FIRESTORE_URL, data=body, method='PATCH',
+        url, data=body, method='PATCH',
         headers={'Content-Type': 'application/json'}
     )
     with urllib.request.urlopen(req, timeout=10):
