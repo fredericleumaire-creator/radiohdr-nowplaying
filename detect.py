@@ -3,14 +3,16 @@ from shazamio import Shazam
 
 STREAM_URL    = 'http://stream.principeactif.net/hdr.mp3'
 FIRESTORE_BASE = 'https://firestore.googleapis.com/v1/projects/radiohdr-39922/databases/(default)/documents/nowplaying'
-FIRESTORE_CURRENT = f'{FIRESTORE_BASE}/current'
-FIRESTORE_BEFORE  = f'{FIRESTORE_BASE}/before'
+FIRESTORE_CURRENT     = f'{FIRESTORE_BASE}/current'
+FIRESTORE_BEFORE      = f'{FIRESTORE_BASE}/before'
+FIRESTORE_BEFOREBEFORE= f'{FIRESTORE_BASE}/beforebefore'
 ICECAST_URL   = 'http://stream.principeactif.net/status-json.xsl'
 INTERVAL_SECS = 30
 RETRY_SECS    = 15
 
-# ─── État en mémoire du dernier current connu ────────────────────────────────
+# ─── État en mémoire ─────────────────────────────────────────────────────────
 last_current: dict | None = None
+last_before:  dict | None = None
 
 def main():
     asyncio.run(loop())
@@ -76,27 +78,31 @@ async def run_detection():
 
 def _handle_transition(new_data: dict | None):
     """
-    Gère la transition current → before selon l'algo :
-    - Si last_current est non null ET différent du nouveau → copier dans before
-    - Écrire new_data dans current (null ou nouveau morceau)
+    Cascade :
+      beforebefore ← before ← current   (si current non null et différent du nouveau)
+      current ← new_data
     """
-    global last_current
+    global last_current, last_before
 
     new_is_different = (
         last_current is not None and
-        new_data != last_current and
-        # Comparer sur title+artist pour éviter faux positifs sur listeners
         (new_data is None or
-         new_data.get('title') != last_current.get('title') or
+         new_data.get('title')  != last_current.get('title') or
          new_data.get('artist') != last_current.get('artist'))
     )
 
     if new_is_different:
+        # Si before existe déjà, on le pousse dans beforebefore
+        if last_before is not None:
+            save_to_firestore(last_before, FIRESTORE_BEFOREBEFORE)
+            print(f'[beforebefore] ← {last_before.get("title")} — {last_before.get("artist")}')
+        # On pousse current dans before
         save_to_firestore(last_current, FIRESTORE_BEFORE)
         print(f'[before] ← {last_current.get("title")} — {last_current.get("artist")}')
+        last_before = last_current
 
     save_to_firestore(new_data or {}, FIRESTORE_CURRENT)
-    last_current = new_data  # None ou le nouveau morceau
+    last_current = new_data
 
 
 def capture_stream():
