@@ -32,7 +32,9 @@ async def run_detection():
 
     mp3_data = capture_stream()
     if not mp3_data:
+        listeners = fetch_listeners()
         _handle_transition(None)
+        save_to_firestore({'listeners': listeners}, FIRESTORE_CURRENT)
         return False
 
     shazam = Shazam()
@@ -47,7 +49,9 @@ async def run_detection():
             track   = result2.get('track')
 
     if not track:
+        listeners = fetch_listeners()
         _handle_transition(None)
+        save_to_firestore({'listeners': listeners}, FIRESTORE_CURRENT)
         print('[shazam] Titre non reconnu — Firestore vidé')
         return False
 
